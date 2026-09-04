@@ -1,78 +1,83 @@
 <script setup>
-import { ref, onMounted, onUnmounted } from 'vue';
+import { onMounted, onUnmounted } from "vue";
+import { registerCleanup } from "../../store/game-store.js";
 
 // x秒ごとにy文字の文字数を文字化けさせる。(上限10回)
+// 文字化けは実際のDOMテキストノードを直接書き換えるため、
+// 異変が終わった際に必ず元へ戻せるよう、元テキストを保持しておく。
 let textCorruptionIntervalId = null;
+const originalTexts = new Map(); // 書き換えたノード -> 元のテキスト
+let unregisterCleanup = null;
 
-function startTextCorruption(intervalSec = 3, countPer = 3) {
-  // 全てのロジックを同一スコープ内に配置
-  let interval = 1000 * intervalSec;
-  const corruptChars = [
-    '�',
-    '□',
-    '▢',
-    '▣',
-    '▤',
-    '▥',
-    '▦',
-    '▧',
-    '▨',
-    '▩',
-    '◼',
-    '◻',
-    '▪',
-    '▫',
-    '■',
-    '□',
-    '▬',
-    '▭',
-    '▮',
-    '▯',
-    '◆',
-    '◇',
-    '◈',
-    '◉',
-    '◊',
-    '○',
-    '●',
-    '◐',
-    '◑',
-    '◒',
-    '◓',
-    '◔',
-    '◕',
-  ];
-  let executionCount = 0;
-  const maxExecutions = 10;
-  const originalTexts = new Map(); // 元のテキストを保存
+const corruptChars = [
+  "�",
+  "□",
+  "▢",
+  "▣",
+  "▤",
+  "▥",
+  "▦",
+  "▧",
+  "▨",
+  "▩",
+  "◼",
+  "◻",
+  "▪",
+  "▫",
+  "■",
+  "□",
+  "▬",
+  "▭",
+  "▮",
+  "▯",
+  "◆",
+  "◇",
+  "◈",
+  "◉",
+  "◊",
+  "○",
+  "●",
+  "◐",
+  "◑",
+  "◒",
+  "◓",
+  "◔",
+  "◕",
+];
 
-  // DOMツリーからテキストノードを収集する関数
-  function getTextNodes(node, textNodes = []) {
-    if (node.nodeType === Node.TEXT_NODE) {
-      // 空白や改行のみのノードは除外
-      if (node.textContent.trim().length > 0) {
-        textNodes.push(node);
-      }
-    } else {
-      // scriptタグとstyleタグは除外
-      if (node.nodeName !== 'SCRIPT' && node.nodeName !== 'STYLE') {
-        for (let child of node.childNodes) {
-          getTextNodes(child, textNodes);
-        }
+// DOMツリーからテキストノードを収集する関数
+function getTextNodes(node, textNodes = []) {
+  if (node.nodeType === Node.TEXT_NODE) {
+    // 空白や改行のみのノードは除外
+    if (node.textContent.trim().length > 0) {
+      textNodes.push(node);
+    }
+  } else {
+    // scriptタグとstyleタグは除外
+    if (node.nodeName !== "SCRIPT" && node.nodeName !== "STYLE") {
+      for (let child of node.childNodes) {
+        getTextNodes(child, textNodes);
       }
     }
-    return textNodes;
   }
+  return textNodes;
+}
 
-  // ランダムな文字化け文字を取得
-  function getRandomCorruptChar() {
-    return corruptChars[Math.floor(Math.random() * corruptChars.length)];
-  }
+// ランダムな文字化け文字を取得
+function getRandomCorruptChar() {
+  return corruptChars[Math.floor(Math.random() * corruptChars.length)];
+}
+
+function startTextCorruption(intervalSec = 3, countPer = 3) {
+  const interval = 1000 * intervalSec;
+  let executionCount = 0;
+  const maxExecutions = 10;
 
   // テキストをランダムに文字化けさせる関数
   function corruptText() {
     if (executionCount >= maxExecutions) {
       clearInterval(intervalId);
+      textCorruptionIntervalId = null;
       return;
     }
 
@@ -110,22 +115,51 @@ function startTextCorruption(intervalSec = 3, countPer = 3) {
     executionCount++;
   }
 
-  // インターバルで実行
+  // インターバルで実行（初回はintervalミリ秒後）
   const intervalId = setInterval(corruptText, interval);
-
-  // 初回実行は即座に行わない（intervalミリ秒後に開始）
   return intervalId;
+}
+
+// 書き換えたテキストをすべて元に戻す
+function restoreOriginalTexts() {
+  originalTexts.forEach((original, node) => {
+    // 文字化けさせた文字が今も残っている場合のみ元に戻す。
+    // （Vueの再描画で既に別の内容へ更新されたノードは上書きしない）
+    try {
+      node.textContent = original;
+    } catch (e) {
+      // ノードが既にDOMから切り離されている場合などは無視
+    }
+  });
+  originalTexts.clear();
+}
+
+// 文字化けを止めて画面を元に戻す
+function stopTextCorruption() {
+  if (textCorruptionIntervalId) {
+    clearInterval(textCorruptionIntervalId);
+    textCorruptionIntervalId = null;
+  }
+  restoreOriginalTexts();
 }
 
 // コンポーネントがマウントされた後に文字化け機能を開始
 onMounted(() => {
-  textCorruptionIntervalId = startTextCorruption(1.5, 5); // 1秒ごとに5文字ずつ文字化け
+  textCorruptionIntervalId = startTextCorruption(1.5, 5); // 1.5秒ごとに5文字ずつ文字化け
+
+  // ラウンド切り替え時（cleanupCurrentAnomaly）に同期的に呼ばれる。
+  // ここで文字化けを停止し、元のテキストへ確実に復元する。
+  unregisterCleanup = registerCleanup(() => {
+    stopTextCorruption();
+  });
 });
 
-// コンポーネントがアンマウントされる際にインターバルをクリア
+// コンポーネントがアンマウントされる際のフォールバック
 onUnmounted(() => {
-  if (textCorruptionIntervalId) {
-    clearInterval(textCorruptionIntervalId);
+  stopTextCorruption();
+  if (unregisterCleanup) {
+    unregisterCleanup();
+    unregisterCleanup = null;
   }
 });
 </script>
